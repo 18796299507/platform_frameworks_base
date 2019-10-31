@@ -302,16 +302,18 @@ class ProcessRecord implements WindowProcessListener {
     boolean whitelistManager;
 
     // Params used in starting this process.
-    HostingRecord hostingRecord;
+    String hostingType;
+    String hostingNameStr;
     String seInfo;
     long startTime;
     // This will be same as {@link #uid} usually except for some apps used during factory testing.
     int startUid;
 
-    void setStartParams(int startUid, HostingRecord hostingRecord, String seInfo,
+    void setStartParams(int startUid, String hostingType, String hostingNameStr, String seInfo,
             long startTime) {
         this.startUid = startUid;
-        this.hostingRecord = hostingRecord;
+        this.hostingType = hostingType;
+        this.hostingNameStr = hostingNameStr;
         this.seInfo = seInfo;
         this.startTime = startTime;
     }

@@ -1640,7 +1640,7 @@ public final class BroadcastQueue {
         if ((r.curApp=mService.startProcessLocked(targetProcess,
                 info.activityInfo.applicationInfo, true,
                 r.intent.getFlags() | Intent.FLAG_FROM_BACKGROUND,
-                new HostingRecord("broadcast", r.curComponent),
+                "broadcast", r.curComponent,
                 (r.intent.getFlags()&Intent.FLAG_RECEIVER_BOOT_UPGRADE) != 0, false, false))
                         == null) {
             // Ah, this recipient is unavailable.  Finish it if necessary,

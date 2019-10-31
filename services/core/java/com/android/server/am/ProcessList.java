@@ -454,13 +454,13 @@ public final class ProcessList {
         }
 
         @GuardedBy("ProcessList.this.mService")
-        IsolatedUidRange getIsolatedUidRangeLocked(String processName, int uid) {
-            return mAppRanges.get(processName, uid);
+        IsolatedUidRange getIsolatedUidRangeLocked(ApplicationInfo info) {
+            return mAppRanges.get(info.processName, info.uid);
         }
 
         @GuardedBy("ProcessList.this.mService")
-        IsolatedUidRange getOrCreateIsolatedUidRangeLocked(String processName, int uid) {
-            IsolatedUidRange range = getIsolatedUidRangeLocked(processName, uid);
+        IsolatedUidRange getOrCreateIsolatedUidRangeLocked(ApplicationInfo info) {
+            IsolatedUidRange range = getIsolatedUidRangeLocked(info);
             if (range == null) {
                 int uidRangeIndex = mAvailableUidRanges.nextSetBit(0);
                 if (uidRangeIndex < 0) {
@@ -470,7 +470,7 @@ public final class ProcessList {
                 mAvailableUidRanges.clear(uidRangeIndex);
                 int actualUid = mFirstUid + uidRangeIndex * mNumUidsPerRange;
                 range = new IsolatedUidRange(actualUid, actualUid + mNumUidsPerRange - 1);
-                mAppRanges.put(processName, uid, range);
+                mAppRanges.put(info.processName, info.uid, range);
             }
             return range;
         }
@@ -1420,13 +1420,14 @@ public final class ProcessList {
     /**
      * @return {@code true} if process start is successful, false otherwise.
      * @param app
-     * @param hostingRecord
+     * @param hostingType
+     * @param hostingNameStr
      * @param disableHiddenApiChecks
      * @param abiOverride
      */
     @GuardedBy("mService")
-    boolean startProcessLocked(ProcessRecord app, HostingRecord hostingRecord,
-            boolean disableHiddenApiChecks, boolean mountExtStorageFull,
+    boolean startProcessLocked(ProcessRecord app, String hostingType,
+            String hostingNameStr, boolean disableHiddenApiChecks, boolean mountExtStorageFull,
             String abiOverride) {
         if (app.pendingStart) {
             return true;
@@ -1618,7 +1619,7 @@ public final class ProcessList {
             // the PID of the new process, or else throw a RuntimeException.
             final String entryPoint = "android.app.ActivityThread";
 
-            return startProcessLocked(hostingRecord, entryPoint, app, uid, gids,
+            return startProcessLocked(hostingType, hostingNameStr, entryPoint, app, uid, gids,
                     runtimeFlags, mountExternal, seInfo, requiredAbi, instructionSet, invokeWith,
                     startTime);
         } catch (RuntimeException e) {
@@ -1637,7 +1638,7 @@ public final class ProcessList {
     }
 
     @GuardedBy("mService")
-    boolean startProcessLocked(HostingRecord hostingRecord,
+    boolean startProcessLocked(String hostingType, String hostingNameStr,
             String entryPoint,
             ProcessRecord app, int uid, int[] gids, int runtimeFlags, int mountExternal,
             String seInfo, String requiredAbi, String instructionSet, String invokeWith,
@@ -1655,7 +1656,7 @@ public final class ProcessList {
                     + " with non-zero pid:" + app.pid);
         }
         final long startSeq = app.startSeq = ++mProcStartSeqCounter;
-        app.setStartParams(uid, hostingRecord, seInfo, startTime);
+        app.setStartParams(uid, hostingType, hostingNameStr, seInfo, startTime);
         app.setUsingWrapper(invokeWith != null
                 || SystemProperties.get("wrap." + app.processName) != null);
         mPendingStarts.put(startSeq, app);
@@ -1665,7 +1666,7 @@ public final class ProcessList {
                     "Posting procStart msg for " + app.toShortString());
             mService.mProcStartHandler.post(() -> {
                 try {
-                    final Process.ProcessStartResult startResult = startProcess(app.hostingRecord,
+                    final Process.ProcessStartResult startResult = startProcess(app.hostingType,
                             entryPoint, app, app.startUid, gids, runtimeFlags, mountExternal,
                             app.seInfo, requiredAbi, instructionSet, invokeWith, app.startTime);
                     synchronized (mService) {
@@ -1686,7 +1687,7 @@ public final class ProcessList {
             return true;
         } else {
             try {
-                final Process.ProcessStartResult startResult = startProcess(hostingRecord,
+                final Process.ProcessStartResult startResult = startProcess(hostingType,
                         entryPoint, app,
                         uid, gids, runtimeFlags, mountExternal, seInfo, requiredAbi, instructionSet,
                         invokeWith, startTime);
@@ -1720,14 +1721,12 @@ public final class ProcessList {
     private void removeProcessFromAppZygoteLocked(final ProcessRecord app) {
         // Free the isolated uid for this process
         final IsolatedUidRange appUidRange =
-                mAppIsolatedUidRangeAllocator.getIsolatedUidRangeLocked(app.info.processName,
-                        app.hostingRecord.getDefiningUid());
+                mAppIsolatedUidRangeAllocator.getIsolatedUidRangeLocked(app.info);
         if (appUidRange != null) {
             appUidRange.freeIsolatedUidLocked(app.uid);
         }
 
-        final AppZygote appZygote = mAppZygotes.get(app.info.processName,
-                app.hostingRecord.getDefiningUid());
+        final AppZygote appZygote = mAppZygotes.get(app.info.processName, app.info.uid);
         if (appZygote != null) {
             ArrayList<ProcessRecord> zygoteProcesses = mAppZygoteProcesses.get(appZygote);
             zygoteProcesses.remove(app);
@@ -1748,40 +1747,21 @@ public final class ProcessList {
 
     private AppZygote createAppZygoteForProcessIfNeeded(final ProcessRecord app) {
         synchronized (mService) {
-            // The UID for the app zygote should be the UID of the application hosting
-            // the service.
-            final int uid = app.hostingRecord.getDefiningUid();
-            AppZygote appZygote = mAppZygotes.get(app.info.processName, uid);
+            AppZygote appZygote = mAppZygotes.get(app.info.processName, app.info.uid);
             final ArrayList<ProcessRecord> zygoteProcessList;
             if (appZygote == null) {
-                if (DEBUG_PROCESSES) {
-                    Slog.d(TAG_PROCESSES, "Creating new app zygote.");
-                }
                 final IsolatedUidRange uidRange =
-                        mAppIsolatedUidRangeAllocator.getIsolatedUidRangeLocked(
-                                app.info.processName, app.hostingRecord.getDefiningUid());
-                final int userId = UserHandle.getUserId(uid);
+                        mAppIsolatedUidRangeAllocator.getIsolatedUidRangeLocked(app.info);
+                final int userId = UserHandle.getUserId(app.info.uid);
                 // Create the app-zygote and provide it with the UID-range it's allowed
                 // to setresuid/setresgid to.
                 final int firstUid = UserHandle.getUid(userId, uidRange.mFirstUid);
                 final int lastUid = UserHandle.getUid(userId, uidRange.mLastUid);
-                ApplicationInfo appInfo = new ApplicationInfo(app.info);
-                // If this was an external service, the package name and uid in the passed in
-                // ApplicationInfo have been changed to match those of the calling package;
-                // that is not what we want for the AppZygote though, which needs to have the
-                // packageName and uid of the defining application. This is because the
-                // preloading only makes sense in the context of the defining application,
-                // not the calling one.
-                appInfo.packageName = app.hostingRecord.getDefiningPackageName();
-                appInfo.uid = uid;
-                appZygote = new AppZygote(appInfo, uid, firstUid, lastUid);
-                mAppZygotes.put(app.info.processName, uid, appZygote);
+                appZygote = new AppZygote(app.info, app.info.uid, firstUid, lastUid);
+                mAppZygotes.put(app.info.processName, app.info.uid, appZygote);
                 zygoteProcessList = new ArrayList<ProcessRecord>();
                 mAppZygoteProcesses.put(appZygote, zygoteProcessList);
             } else {
-                if (DEBUG_PROCESSES) {
-                    Slog.d(TAG_PROCESSES, "Reusing existing app zygote.");
-                }
                 mService.mHandler.removeMessages(KILL_APP_ZYGOTE_MSG, appZygote);
                 zygoteProcessList = mAppZygoteProcesses.get(appZygote);
             }
@@ -1795,7 +1775,7 @@ public final class ProcessList {
         }
     }
 
-    private Process.ProcessStartResult startProcess(HostingRecord hostingRecord, String entryPoint,
+    private Process.ProcessStartResult startProcess(String hostingType, String entryPoint,
             ProcessRecord app, int uid, int[] gids, int runtimeFlags, int mountExternal,
             String seInfo, String requiredAbi, String instructionSet, String invokeWith,
             long startTime) {
@@ -1804,13 +1784,13 @@ public final class ProcessList {
                     app.processName);
             checkSlow(startTime, "startProcess: asking zygote to start proc");
             final Process.ProcessStartResult startResult;
-            if (hostingRecord.usesWebviewZygote()) {
+            if (hostingType.equals("webview_service")) {
                 startResult = startWebView(entryPoint,
                         app.processName, uid, uid, gids, runtimeFlags, mountExternal,
                         app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
                         app.info.dataDir, null, app.info.packageName,
                         new String[] {PROC_START_SEQ_IDENT + app.startSeq});
-            } else if (hostingRecord.usesAppZygote()) {
+            } else if (hostingType.equals("app_zygote")) {
                 final AppZygote appZygote = createAppZygoteForProcessIfNeeded(app);
 
                 startResult = appZygote.getProcess().start(entryPoint,
@@ -1834,20 +1814,21 @@ public final class ProcessList {
     }
 
     @GuardedBy("mService")
-    final void startProcessLocked(ProcessRecord app, HostingRecord hostingRecord) {
-        startProcessLocked(app, hostingRecord, null /* abiOverride */);
+    final void startProcessLocked(ProcessRecord app,
+            String hostingType, String hostingNameStr) {
+        startProcessLocked(app, hostingType, hostingNameStr, null /* abiOverride */);
     }
 
     @GuardedBy("mService")
-    final boolean startProcessLocked(ProcessRecord app, HostingRecord hostingRecord,
-            String abiOverride) {
-        return startProcessLocked(app, hostingRecord,
+    final boolean startProcessLocked(ProcessRecord app,
+            String hostingType, String hostingNameStr, String abiOverride) {
+        return startProcessLocked(app, hostingType, hostingNameStr,
                 false /* disableHiddenApiChecks */, false /* mountExtStorageFull */, abiOverride);
     }
 
     @GuardedBy("mService")
     final ProcessRecord startProcessLocked(String processName, ApplicationInfo info,
-            boolean knownToBeDead, int intentFlags, HostingRecord hostingRecord,
+            boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
             boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
             String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler) {
         long startTime = SystemClock.elapsedRealtime();
@@ -1917,9 +1898,13 @@ public final class ProcessList {
             checkSlow(startTime, "startProcess: done killing old proc");
         }
 
+        String hostingNameStr = hostingName != null
+                ? hostingName.flattenToShortString() : null;
+
         if (app == null) {
+            final boolean fromAppZygote = "app_zygote".equals(hostingType);
             checkSlow(startTime, "startProcess: creating new process record");
-            app = newProcessRecordLocked(info, processName, isolated, isolatedUid, hostingRecord);
+            app = newProcessRecordLocked(info, processName, isolated, isolatedUid, fromAppZygote);
             if (app == null) {
                 Slog.w(TAG, "Failed making new process record for "
                         + processName + "/" + info.uid + " isolated=" + isolated);
@@ -1950,7 +1935,8 @@ public final class ProcessList {
         }
 
         checkSlow(startTime, "startProcess: stepping in to startProcess");
-        final boolean success = startProcessLocked(app, hostingRecord, abiOverride);
+        final boolean success = startProcessLocked(app, hostingType, hostingNameStr,
+                abiOverride);
         checkSlow(startTime, "startProcess: done starting proc!");
         return success ? app : null;
     }
@@ -2011,8 +1997,8 @@ public final class ProcessList {
 
         EventLog.writeEvent(EventLogTags.AM_PROC_START,
                 UserHandle.getUserId(app.startUid), pid, app.startUid,
-                app.processName, app.hostingRecord.getType(),
-                app.hostingRecord.getName() != null ? app.hostingRecord.getName() : "");
+                app.processName, app.hostingType,
+                app.hostingNameStr != null ? app.hostingNameStr : "");
 
         try {
             AppGlobals.getPackageManager().logAppProcessStartIfNeeded(app.processName, app.uid,
@@ -2040,10 +2026,10 @@ public final class ProcessList {
             buf.append("]");
         }
         buf.append(" for ");
-        buf.append(app.hostingRecord.getType());
-        if (app.hostingRecord.getName() != null) {
+        buf.append(app.hostingType);
+        if (app.hostingNameStr != null) {
             buf.append(" ");
-            buf.append(app.hostingRecord.getName());
+            buf.append(app.hostingNameStr);
         }
         mService.reportUidInfoMessageLocked(TAG, buf.toString(), app.startUid);
         app.setPid(pid);
@@ -2307,25 +2293,24 @@ public final class ProcessList {
 
     @GuardedBy("mService")
     private IsolatedUidRange getOrCreateIsolatedUidRangeLocked(ApplicationInfo info,
-            HostingRecord hostingRecord) {
-        if (hostingRecord == null || !hostingRecord.usesAppZygote()) {
+            boolean fromAppZygote) {
+        if (!fromAppZygote) {
             // Allocate an isolated UID from the global range
             return mGlobalIsolatedUids;
         } else {
-            return mAppIsolatedUidRangeAllocator.getOrCreateIsolatedUidRangeLocked(
-                    info.processName, hostingRecord.getDefiningUid());
+            return mAppIsolatedUidRangeAllocator.getOrCreateIsolatedUidRangeLocked(info);
         }
     }
 
     @GuardedBy("mService")
     final ProcessRecord newProcessRecordLocked(ApplicationInfo info, String customProcess,
-            boolean isolated, int isolatedUid, HostingRecord hostingRecord) {
+            boolean isolated, int isolatedUid, boolean fromAppZygote) {
         String proc = customProcess != null ? customProcess : info.processName;
         final int userId = UserHandle.getUserId(info.uid);
         int uid = info.uid;
         if (isolated) {
             if (isolatedUid == 0) {
-                IsolatedUidRange uidRange = getOrCreateIsolatedUidRangeLocked(info, hostingRecord);
+                IsolatedUidRange uidRange = getOrCreateIsolatedUidRangeLocked(info, fromAppZygote);
                 if (uidRange == null) {
                     return null;
                 }
