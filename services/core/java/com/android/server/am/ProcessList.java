@@ -1831,6 +1831,19 @@ public final class ProcessList {
             boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
             boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
             String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler) {
+        if (PreventRunningUtils.hookStartProcessLocked(processName, info, knownToBeDead, intentFlags, hostingType, hostingName)) {
+            return startProcessLocked$Pr(processName, info,
+                    knownToBeDead, intentFlags, hostingType, hostingName,
+                    allowWhileBooting, isolated, isolatedUid, keepIfLarge,
+                    abiOverride, entryPoint, entryPointArgs, crashHandler);
+        } else {
+            return null;
+        }
+    }
+    final ProcessRecord startProcessLocked$Pr(String processName, ApplicationInfo info,
+            boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
+            boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
+            String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler) {
         long startTime = SystemClock.elapsedRealtime();
         ProcessRecord app;
         if (!isolated) {
@@ -2147,8 +2160,9 @@ public final class ProcessList {
                     // that match it.  We need to qualify this by the processes
                     // that are running under the specified app and user ID.
                 } else {
-                    final boolean isDep = app.pkgDeps != null
+                    boolean isDep = app.pkgDeps != null
                             && app.pkgDeps.contains(packageName);
+                    isDep = PreventRunningUtils.returnFalse(isDep);
                     if (!isDep && UserHandle.getAppId(app.uid) != appId) {
                         continue;
                     }
